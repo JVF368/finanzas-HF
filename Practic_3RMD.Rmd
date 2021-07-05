@@ -1,0 +1,608 @@
+---
+title: "Tarea 3 - Descomposición de la horquilla"
+author: "Jordi Vanrell Forteza"
+date: "16/6/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, include = T, message = F, warning = F, cache = T)
+```
+
+La tarea requiere escoger los tres mismos archivos que en la Tarea 1, además de los datos de las mejores cotizaciones de compra y venta consolidadas en cada instante para los mismos activos. Recuérdese que los archivos de coresponden con las transacciones de 3 acciones de los 3 grupos de capitalización, nombrados como _Stock20x.txt_ (pequeña), _Stock10x.txt_ (media) y _Stockx.txt_ (grande); los datos sobre mejores cotizaciones de compra y venta vienen nombrados como _Stock20xNBBO.txt_ (pequeña), _Stock10xNBBO.txt_ (media) y _StockxNBBO.txt_ (grande). Se escogen los activos con la misma semilla, se leen con un bucle y se almacenan los nueve en dos listas con el mismo orden.
+
+```{r}
+set.seed(603)
+idx <- as.character(sample(1:5, size = 3, replace = F))
+idx <- c(paste0("", idx), paste0("10", idx), paste0("20", idx))
+idx2 <- list(idx[1:3], idx[4:6], idx[7:9])
+
+NBBO <- vector(mode = "list", length = length(idx))
+Stock <- vector(mode = "list", length = length(idx))
+for (i in idx){ # Bucle de lectura de los archivos; se almacenan en listas
+  NBBO[[which(idx==i)]] <- read.table(paste0("Stock", i, "NBBO.txt"), header = T)
+  Stock[[which(idx==i)]] <- read.table(paste0("../Finanzas HF - Practic_1/Stock", i, ".txt"), header = T)
+  rm(i)
+}
+```
+
+Cada lista consisten en 9 tablas de datos ordenadas según el índice de posición del vector `idx`: 5, 3, 1, 105, 103, 101, 205, 203 y 201.
+
+# 1. Descomposición de la horquilla del precio
+
+```{r}
+require(tidyverse)
+```
+
+En este punto se requiere la estimación de los parámetros de descomposición de la horquilla de precios considerando la existencia de costes de selección adversa y costes operativos. En concreto, se pide:
+
+I. Coeficientes diarios estimados para cada activo.
+
+II. Coeficientes medios diaios estimados por activo, a lo que hay que añadir un contraste de significatividad de las diferencias entre empresas pequeñas/medianas y grandes.
+
+III. Descomposición de la horquilla según los porcentajes debidos a selección adversa y costes operativos, más otro contraste como el anterior.
+
+IV. Descomposición de la volatilidad del precio eficiente según porcentaje explicado por los costes de selección adversa, más otro contraste como el anterior.
+
+V. Descomposición de la volatilidad del precio observado según porcentaje de la volatilidad debido a ruido e información pública, más otro contraste como el anterior.
+
+## 1.I. Coeficientes diarios estimados para cada activo.
+
+Se arma un bucle dentro del cual, para cada activo y tras filtrar por día se efectía una regresión lineal múltiple con el signo de la transacción actual e inmediatamente anterior como variables explicativas y el cambio de precio como variable dependiente. De cada regresión se capturan los coeficientes de las variables explicativas (y la varianza de los residuos, para su uso posterior) y se almacenan en una tabla por activo. A continuación se agregan los coeficientes de los signos de las transacciones de todos los activos en una sola tabla.
+
+```{r}
+# TABLA I
+pre_tabla_i <- vector(mode = "list", length = length(Stock))
+
+for (d in 1:length(Stock)){
+  pre_subtabla_i <- data.frame() # tabla depositaria
+  day <- unique(Stock[[d]]$day) # vector de días
+  for (t in day){
+    Stock_day <- Stock[[d]] %>%
+      filter(day == t) %>% # filtra por día
+      mutate(dprice = price - lag(price)) # genera var de cambio de precio
+    lm <- lm(dprice ~ buysell+lag(buysell), data = Stock_day) # MCO
+    row <- data.frame(beta0 = as.numeric(lm$coefficients[1]), # captura de
+                      beta1 = as.numeric(lm$coefficients[2]), # coeficient.
+                      beta2 = as.numeric(lm$coefficients[3]),
+                      sigmau2 = var(lm$residuals)) # captura de var de res
+    pre_subtabla_i <- rbind(pre_subtabla_i, row) # añade coef estimados
+  }
+  pre_tabla_i[[d]] <- pre_subtabla_i # almacena coef diarios del activo
+  coef <- colnames(pre_subtabla_i)[1:3]
+  rownames(pre_tabla_i[[d]]) <- paste0("day.", day)
+  colnames(pre_tabla_i[[d]]) <- c(paste0("St", idx[d], ".", coef), "sigmau2")
+  rm(d, pre_subtabla_i, Stock_day, lm, row, t)
+}
+
+tabla_i <- pre_tabla_i[[1]][,2:3]
+for (d in 2:length(pre_tabla_i)){
+  tabla_i <- cbind(tabla_i, pre_tabla_i[[d]][,2:3]); rm(d)
+}
+```
+
+```{r, eval=FALSE}
+# Por cuestiones de compilación la tabla (esta y las siguientes) se ha generado de forma separada,de acuerdo con el código que sigue. Este es un código que NO puede compilarse en Rmd.
+library(officer)
+library(flextable)
+library(magrittr)
+# Para exportar tablas a formato Word
+ft <- flextable(data = format(tabla_i, scientific = T) %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla I", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA LA TABLA I-
+
+## 1.II. Coeficientes medios diaios estimados por activo
+
+Como resumen de la anterior se presentan los coeficientes diarios medios de cada activo.
+
+```{r}
+# Tabla II: 9 activos, 2 coeficientes
+tabla_ii <- data.frame()
+for (d in 1:length(pre_tabla_i)){
+  row <- data.frame(mbeta1 = mean(pre_tabla_i[[d]][,2]),
+                    mbeta2 = mean(pre_tabla_i[[d]][,3]))
+  tabla_ii <- rbind(tabla_ii, row); rm(d, row)
+}
+rownames(tabla_ii) <- paste0("St.", idx)
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = format(tabla_ii, scientific = T) %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla II", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA LA TABLA II-
+
+A continuación se efectúa el *rank-sum test de Wilcoxon* por pares con el fin de determinar si los coeficientes $\beta$ de las empresas grandes son diferentes de los de las pequeñas y medianas. Este test contrasta la hipótesis nula de que las medianas de dos distribuciones de valores son iguales contra la alternativa, que postula lo contrario. Se toma el nivel de significación del 5%, con lo que un p-valor del contraste por debajo de 0.05 implica que se rechaza la hipótesis nula de igualdad de medianas.
+
+```{r}
+# Preparación de los datos para Test de Wilcoxon
+wilcoxont1 <- vector(mode = "list", length = length(idx2))
+for (c in 1:length(idx2)){ # Este bucle agrega las obs de igual grado de cap.
+  subwilcoxont1 <- data.frame() # Tabla depositaria
+  for (d in 1:length(idx2[[c]])){
+    pre_tabla_i2 <- pre_tabla_i
+    colnames(pre_tabla_i2[[which(idx==idx2[[c]][d])]])[2:3] <- coef[2:3]
+    rownames(pre_tabla_i2[[which(idx==idx2[[c]][d])]]) <- 
+      paste0("day.", day, ".St", idx[which(idx==idx2[[c]][d])])
+    portion <- pre_tabla_i2[[which(idx==idx2[[c]][d])]][,2:3]
+    subwilcoxont1 <- rbind(subwilcoxont1, portion) # agrega fila
+  }
+  wilcoxont1[[c]] <- subwilcoxont1 # guarda activos de misma cap.
+  rm(c, d, pre_tabla_i2, subwilcoxont1, portion)
+}
+
+pairs <- list(c(1, 2), c(1, 3), c(2, 3)) # vector de parejas
+cap <- c("Gran", "Med", "Peq")
+wilcoxtable <- data.frame(aux = rep(NA, length(coef[2:3])))
+
+for (c in 1:length(pairs)){
+  subwilcoxtable <- data.frame() # tabla depositaria
+  for (r in 1:(ncol(wilcoxont1[[c]]))){
+    x <- wilcoxont1[[pairs[[c]][1]]][, r] # primer vector
+    y <- wilcoxont1[[pairs[[c]][2]]][, r] # segundo vector
+    # Captura el p-valor:
+    pvalue <- wilcox.test(x, y, alternative = "two.sided", paired = F)$p.value
+    pvalue <- data.frame(pick = pvalue) #convierte p-valor a fila
+    subwilcoxtable <- rbind(subwilcoxtable, pvalue) # agrega fila a tabla
+  }
+  wilcoxtable <- cbind(wilcoxtable, subwilcoxtable) # agrega columnas
+  rm(c, r, x, y, pvalue, subwilcoxtable)
+}
+wilcoxtable <- wilcoxtable[, 2:4] # Se descarta la columna aux.
+rownames(wilcoxtable) <- coef[2:3]
+colnames(wilcoxtable) <- c("Gran_vs_Med", "Gran_vs_Peq", "Med_vs_Peq")
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = format(wilcoxtable, scientific = T) %>% 
+                  add_rownames()) %>% theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Contrastes de Wilcoxon", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA WILCOXTABLE-
+
+En general, los p-valores indican que, por lo que respecta a los coeficientes $\beta$ calculados, los activos de capitalización media y pequeña son iguales entre sí, pero diferentes a los de gran capitalización.
+
+## 1.III. Descomposición de la horquilla (% de SA/CO)
+
+La importancia de la selección adversa y los costes operativos en la horquilla se determina previa estimación de los parámetros $\gamma$ y $\alpha$ a partir de los valores $\beta_1$ y $\beta_2$ calculados en 1.I. Concretamente, $\gamma$ equivale al negativo de $\beta_2$ y $\alpha$ se determina como la diferencia entre $\beta_1$ y $\gamma$. El porcentaje de selección adversa se calcula como el cociente de $\alpha$ sobre la suma de $\alpha$ y $\gamma$; el de costes operativos es el resto ($\gamma$ sobre la suma de $\alpha$ y $\gamma$). Respecto de la plausibilidad de los valores, se han detectado casos en que las estimaciones diarias de $\beta_2$ son positivas, con lo cual se obtienen valores negativos de $\gamma$ que conllevan porcentajes negativos para los costes operativos. Dado lo irrealista de la situación se han censurado los valores, previos a la computación de la media, entre 0 y 1. Por ejemplo, un porcentaje de selección adversa en un día concreto del 124% y del -24% de costes operativos se traduce en 100% y un 0%. Con esto pretende evitarse un sobredimensionamiento de la importancia de la selección adversa.
+
+```{r}
+for (d in 1:length(pre_tabla_i)){
+  pre_tabla_i[[d]]$e.gamma <- pre_tabla_i[[d]][,3]*(-1)
+  # Arriba calcula gamma de cada día, abajo alfa
+  pre_tabla_i[[d]]$e.alpha <- pre_tabla_i[[d]][,2] - pre_tabla_i[[d]]$e.gamma
+  pre_tabla_i[[d]] <- pre_tabla_i[[d]] %>% # Tantos por 1 de s.a. y c.o.
+    mutate(sa = pmin(pmax(e.alpha/(e.gamma + e.alpha), 0), 1),
+           oc = 1 - sa)
+  rm(d)
+}
+
+# En resumen
+tabla_iii <- data.frame()
+for (d in 1:length(pre_tabla_i)){
+  # Cálculo por activo de las medias de tantos por 1
+  row <- data.frame(msa = mean(pre_tabla_i[[d]]$sa),
+                    moc = mean(pre_tabla_i[[d]]$oc))
+  tabla_iii <- rbind(tabla_iii, row); rm(d, row)
+}
+rownames(tabla_iii) <- paste0("St.", idx)
+
+library(scales)
+var <- colnames(tabla_iii) # Se disponen los datos como porcentajes con 2 decimales
+tabla_iii[, var] <- lapply(tabla_iii[, var], percent_format(accuracy = .01))
+rm(var)
+
+
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_iii %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla III", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA III-
+
+Ahora se aplica el test de Wilcoxon sobre los porcentajes calculados.
+
+```{r}
+# Test de Wilcoxon 2
+wilcoxont2 <- vector(mode = "list", length = length(idx2))
+for (c in 1:length(idx2)){
+  subwilcoxont2 <- data.frame()
+  for (d in 1:length(idx2[[c]])){
+    pre_tabla_i2 <- pre_tabla_i
+    colnames(pre_tabla_i2[[which(idx==idx2[[c]][d])]])[1:3] <- coef
+    rownames(pre_tabla_i2[[which(idx==idx2[[c]][d])]]) <- 
+      paste0("day.", day, ".St", idx[which(idx==idx2[[c]][d])])
+    portion <- pre_tabla_i2[[which(idx==idx2[[c]][d])]]
+    subwilcoxont2 <- rbind(subwilcoxont2, portion[,7:8])
+  }
+  wilcoxont2[[c]] <- subwilcoxont2
+  rm(c, d, pre_tabla_i2, subwilcoxont2, portion)
+}
+
+wt21 <- wilcox.test(wilcoxont2[[1]]$sa, wilcoxont2[[2]]$sa, 
+            alternative = "two.sided", paired = F)$p.value
+wt22 <- wilcox.test(wilcoxont2[[1]]$sa, wilcoxont2[[3]]$sa, 
+            alternative = "two.sided", paired = F)$p.value
+```
+
+De los contrastes se desprende que los activos de empresas de gran capitalización son diferentes de las de los de empresas de capitalización media y pequeña (p-valores respectivos de `r format(wt21, scientific = T)` y `r format(wt22, scientific = T)`).
+
+# 1.IV. Descomposición de la volatilidad del precio eficiente.
+
+El precio eficiente es el punto medio entre el mejor *ask* y el mejor *bid* de cada transacción. La volatilidad de este precio cabe calcularla sobre sus cambios. Tal como se ha hecho en el punto 1.I., la descomposición se calcula en base a una regresión por MCO del signo de las transacción en el momento actual. De esta regresión interesa el coeficiente de la regresión relativo al signo de la transacción ($\alpha$), que habrá que elevar al cuadrado, y la varianza de los residuos ($\sigma^2_u$). El porcentaje de la volatilidad de este precio eficiente que se explica por los costes de selección adversa se calcula como el cociente del cuadrado de $\alpha$ entre la suma de $\alpha^2$ y $\sigma^2_u$.
+
+```{r}
+pre_tabla_iv <- vector(mode = "list", length = length(Stock))
+
+for (d in 1:length(Stock)){
+  pre_subtabla_iv <- data.frame() # Tabla depositaria
+  day <- unique(Stock[[d]]$day) # Vector de días
+  for (t in day){
+    Stock_day <- Stock[[d]] %>%
+      filter(day == t) %>% # filtra por día
+      mutate(q = (ask+bid)/2, # precio eficiente
+             dq = q - lag(q)) # cambio del precio eficiente
+    lm <- lm(dq ~ buysell, data = Stock_day) # MCO
+    row <- data.frame(alfa2 = as.numeric(lm$coefficients[2]^2), # alfa^2
+                      sigmau2 = var(lm$residuals)) # var del error
+    pre_subtabla_iv <- rbind(pre_subtabla_iv, row) # agrega fila
+  }
+  pre_tabla_iv[[d]] <- pre_subtabla_iv # guarda tabla
+  rownames(pre_tabla_iv[[d]]) <- paste0("day.", day)
+  rm(d, pre_subtabla_iv, Stock_day, lm, row, t)
+}
+
+for (d in 1:length(pre_tabla_iv)){
+  pre_tabla_iv[[d]] <- pre_tabla_iv[[d]] %>%
+    mutate(vol.sa = round(alfa2*100/(alfa2+sigmau2),2))
+}
+
+tabla_iv <- data.frame()
+for (d in 1:length(pre_tabla_iv)){
+  row <- data.frame(mvol.sa = mean(pre_tabla_iv[[d]]$vol.sa))
+  tabla_iv <- rbind(tabla_iv, row); rm(d, row)
+}
+rownames(tabla_iv) <- paste0("St.", idx)
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_iv %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla IV", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA IV-
+
+Ahora se aplica el test de Wilcoxon sobre los porcentajes calculados.
+
+```{r}
+# Test de Wilcoxon 3
+wilcoxont3 <- vector(mode = "list", length = length(idx2))
+
+for (c in 1:length(idx2)){
+  subwilcoxont3 <- data.frame() # Tabla depositaria
+  for (d in 1:length(idx2[[c]])){
+    pre_tabla_iv2 <- pre_tabla_iv
+    rownames(pre_tabla_iv2[[which(idx==idx2[[c]][d])]]) <- 
+      paste0("day.", day, ".St", idx[which(idx==idx2[[c]][d])])
+    portion <- pre_tabla_iv2[[which(idx==idx2[[c]][d])]]
+    subwilcoxont3 <- rbind(subwilcoxont3, data.frame(vol.sa = portion$vol.sa))
+  }
+  wilcoxont3[[c]] <- subwilcoxont3 # Guarda tabla
+  rm(c, d, pre_tabla_iv2, subwilcoxont3, portion)
+}
+
+wt31 <- wilcox.test(wilcoxont3[[1]]$vol.sa, wilcoxont3[[2]]$vol.sa, 
+                      alternative = "two.sided", paired = F)$p.value
+wt32 <- wilcox.test(wilcoxont3[[1]]$vol.sa, wilcoxont3[[3]]$vol.sa, 
+            alternative = "two.sided", paired = F)$p.value
+```
+
+De los contrastes se desprende que los activos de empresas de gran capitalización son diferentes de las de los de empresas de capitalización media y pequeña (p-valores respectivos de `r format(wt31, scientific = T)` y `r format(wt32, scientific = T)`).
+
+# 1.V. Descomposición de la volatilidad del precio observado
+
+Para el análisis de la descomposición de la volatilidad del pecio observado se ha calculado todo lo necesario en los apartados 1.I. a 1.III. (se ha anticipado la necesidad de $\sigma^2_u$ en 1.I.). La volatilidad transitoria (no informativa) se calcula como dos veces en cociente de $\gamma$ por la suma de $\alpha$ y $\gamma$; la volatilidad por información pública equivale a la suma del cuadrado de $\alpha$ y la varianza de los residuos ($\sigma^2_u$). El porcentaje de volatilidad debida a ruido se calcula a partir del cociente de la volatilidad transitoria sobre la suma de la volatilidad transitoria y la volatilidad por información pública. La calidad se calcula como $\sigma^2_u$ entre la suma de la volatilidad transitoria y la volatilidad por información pública.
+
+```{r}
+tabla_v <- data.frame() # Tabla depositaria
+for (d in 1:length(pre_tabla_i)){
+  pre_tabla_i[[d]] <- pre_tabla_i[[d]] %>%
+    mutate(noinfo = 2*e.gamma*(e.alpha + e.gamma), # vol. ruido
+           info = (e.alpha^2) + sigmau2, # vol. por info pública
+           percnoinfo = noinfo/(noinfo + info), # % ruido
+           Q = sigmau2/(noinfo + info)) # calidad
+  row <- pre_tabla_i[[d]] %>%
+    summarise(mpercnoinfo = mean(percnoinfo), # media de ruido
+              mQ = mean(Q)) # media de calidad
+  tabla_v <- rbind(tabla_v, row); rm(row, d) # agrega fila
+}
+rownames(tabla_v) <- paste0("St.", idx)
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_v %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla V", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA V-
+
+Ahora se aplica el test de Wilcoxon sobre los porcentajes calculados.
+
+```{r}
+# Test de Wilcoxon 4
+wilcoxont4 <- vector(mode = "list", length = length(idx2))
+
+for (c in 1:length(idx2)){
+  subwilcoxont4 <- data.frame()
+  for (d in 1:length(idx2[[c]])){
+    pre_tabla_i2 <- pre_tabla_i
+    colnames(pre_tabla_i2[[which(idx==idx2[[c]][d])]])[1:3] <- coef
+    rownames(pre_tabla_i2[[which(idx==idx2[[c]][d])]]) <- 
+      paste0("day.", day, ".St", idx[which(idx==idx2[[c]][d])])
+    portion <- pre_tabla_i2[[which(idx==idx2[[c]][d])]]
+    subwilcoxont4 <- rbind(subwilcoxont4, portion)
+  }
+  wilcoxont4[[c]] <- subwilcoxont4
+  rm(c, d, pre_tabla_i2, subwilcoxont4, portion)
+}
+
+wt41 <- wilcox.test(wilcoxont4[[1]]$percnoinfo, wilcoxont4[[2]]$percnoinfo, 
+            alternative = "two.sided", paired = F)$p.value
+wt42 <- wilcox.test(wilcoxont4[[1]]$percnoinfo, wilcoxont4[[3]]$percnoinfo, 
+            alternative = "two.sided", paired = F)$p.value
+wt43 <- wilcox.test(wilcoxont4[[1]]$Q, wilcoxont4[[2]]$Q, 
+            alternative = "two.sided", paired = F)$p.value
+wt44 <- wilcox.test(wilcoxont4[[1]]$Q, wilcoxont4[[3]]$Q, 
+            alternative = "two.sided", paired = F)$p.value
+```
+
+De los contrastes se desprende que los activos de empresas de gran capitalización son diferentes de las de los de empresas de capitalización media y pequeña para ambos indicadores (p-valores respectivos de `r format(wt41, scientific = T)` y `r format(wt42, scientific = T)` para los porcentajes de ruido y `r format(wt43, scientific = T)` y `r format(wt44, scientific = T)` para los porcentajes de calidad).
+
+# 2. Descomposición de la horquilla efectiva
+
+La horquilla efectiva puede calcularse como el doble de la diferencia positiva entre el precio observado y el precio eficiente. Es una medida de costes *ex post*, descomponible en horquilla realizada (una medida *ex post* de la compensación al proveedor de liquidez) e impacto en precios (que mide el contenido informativo de la transacción). La determinación de la horquilla realizada requiere el establecimiento de un punto medio en un momento $\tau$ segundos en el futuro y se calcula mediante una forma análoga a la de la horquilla realizada en la que el precio eficiente se sustituye por ese punto medio futuro. El impacto en precios se calcula como el doble de la diferencia positiva entre el punto medio futuro y el punto medio en el momento actual.
+
+El enunciado requiere el cálculo de la descomposición según tres valores de $\tau$ = {5, 30, 60}. El valor de Q asociado a cada uno de estos horizontes se obtiene de los archivos de mejores cotizaciones de compra y venta, `NBBO`, correspondientes a los mismos activos.
+
+En primer lugar se arma un bucle para hallar los valores del punto medio en los tres horizontes $\tau$ para todas las transacciones. Tras generar los valores actuales del punto medio, tanto en los archivos de transacioens como en los de mejores cotizaciones *ask* y *bid* (`NBBO`) el método seguido es el siguiente: se filtran por día los dos archivos correspondientes al mismo activo, en bucle, luego se define una función dependiente de $\tau$ que genera un vector de precios eficientes en el horizonte temporal dado. Los vectores de partida son los vectores de tiempo de los datos de cotización (`Stock`) y de `NBBO`; la función primero busca, para cada transacción, el primer momento posterior al momento de la transacción más $\tau$. De acuerdo con el enunciado, se toma el momento de cotización que está "al menos" $\tau$ segundos tras la transacción, pero si no existen registros $\tau$ segundos tras la transacción el registro debe eliminarse. Esto se ha interpretado como la existencia de una franja temporal válida en la que cabe buscar el registro, con un mínimo de $\tau$ segundos tras la transacción y un máximo que se ha establecido en menos de un segundo después. O, ejemplificándolo para $\tau$ = 5, si se ha producido una transacción a las 9:51:01.85 (9 horas, 51 minutos, 1 segundo y 85 centésimas), se guarda el punto medio del vector del punto medio de `NBBO` siempre que exista un dato de cotización *antes* de las 9:51:07.85, pero no en esa centésima. Si no existe registro se asigna como valor faltante (NA). En todo caso, como es posible que en `NBBO` haya momentos en los cuales se presentan varios precios para el mismo momento temporal, la función se queda con el de la primera posición [1]. A continuación se aplica la función a los tres valores de $\tau$.
+
+```{r}
+pre_tabla_vi <- vector(mode = "list", length = length(Stock))
+
+for (d in 1:length(Stock)){
+  NBBO[[d]] <- NBBO[[d]] %>% mutate(Q = (ask+bid)/2) # Q para tau
+  Stock[[d]] <- Stock[[d]] %>% mutate(Q = (ask+bid)/2) # Q actual
+  day <- unique(Stock[[d]]$day) # se vectorizan los días
+  pre_subtabla_vi <- data.frame() # tabla depositaria
+  for (t in day){
+    NBBO_day <- NBBO[[d]] %>% filter(day == t)
+    Stock_day <- Stock[[d]] %>% filter(day == t)
+    Qtaopick <- function(tao){
+      # Función para la generación del vector de los precios eficientes en
+      # un horizonte temporal dado.
+      # INPUTS:
+      # tao: horizonte temporal en segundos.
+      # OUTPUTS:
+      # Qtao: vector con los precios eficientes del horizonte temporal de tao,
+      # correspondientes a cada una de las operaciones de Stock del día t.
+      T <- Stock_day$time
+      QNBBO <- NBBO_day$Q
+      F <- NBBO_day$time
+      Qtao <- c() # vector depositario
+      for (p in 1:length(T)){
+        if (F[F == min(F[F >= T[p]+tao])][1] - T[p] < (tao + 1))
+        {Qtao[p] <- QNBBO[F == min(F[F >= T[p]+tao])][1]}
+        else
+        {Qtao[p] <- NA}
+        rm(p)
+      }
+      return(Qtao)
+    }
+    Stock_day$Qtao5 <- Qtaopick(5) # vector de Q para tau = 5
+    Stock_day$Qtao30 <- Qtaopick(30) # vector de Q para tau = 30
+    Stock_day$Qtao60 <- Qtaopick(60) # vector de Q para tau = 60
+    pre_subtabla_vi <- rbind(pre_subtabla_vi, Stock_day) # agrega subtabla
+  }
+  pre_tabla_vi[[d]] <- pre_subtabla_vi # guarda tabla
+  cat(paste0("Stock",idx[d], " completed. "))
+  rm(d, t, day, Stock_day, NBBO_day, Qtaopick, pre_subtabla_vi)
+}
+```
+
+Una vez que se dispone de los valores de $Q_\tau$ para cada transacción se dispone de todo lo necesario para proceder a la descomposición de la horquilla. En el enunciado se requiere:
+
+* "La horquilla efectiva, realizada y el impacto en precios estimado medio (entre todas las transacciones) por día y por activo". Tras consultar al respecto (correo electrónico del 10 de junio), el ojetivo se aclara en calcular el promedio de las medias diarias de la horquilla efectiva, realizada y el impacto en precios.
+
+* "La horquilla efectiva, la horquilla relativa, y el impacto en precios medio diario para cada activo (promediando las medias por día)", más un contraste de Wilcoxon como los del apartado 1. Dado que, tal y como este estudiante lo entiende, calcular la horquilla efectiva y el impacto en precios medio diario para cada activo promediando las medias por día sería exactamente lo mismo que se pide en el párrafo anterior, se presume que se requieren medidas relativas de la descomposición de la horquilla, al estilo de lo expuesto en la diapositiva 38 de las transaparencias de la sesión VII. Sin perjuicio de lo expuesto, se contrastan por Wilcoxon las medidas absolutas y las relativas.
+
+## 2.1. Descomposición de la horquilla efectiva (medidas absolutas)
+
+```{r}
+# Tabla VII:
+pre_tabla_vii <- vector(mode = "list", length = length(pre_tabla_vi))
+
+for (d in 1:length(pre_tabla_vi)){
+  pre_tabla_vi[[d]] <- pre_tabla_vi[[d]] %>%
+    mutate(Se = 100*2*(price - Q)*buysell,
+           Srz5 = 100*2*(price - Qtao5)*buysell,
+           ip5 = 100*2*(Qtao5 - Q)*buysell,
+           Srz30 = 100*2*(price - Qtao30)*buysell,
+           ip30 = 100*2*(Qtao30 - Q)*buysell,
+           Srz60 = 100*2*(price - Qtao60)*buysell,
+           ip60 = 100*2*(Qtao60 - Q)*buysell)
+  day <- unique(pre_tabla_vi[[d]]$day)
+  pre_subtabla_vii <- data.frame()
+  for (t in day){
+    pre_tabla_vi_day <- pre_tabla_vi[[d]] %>%
+      filter(day == t) %>%
+      summarise(mprice = mean(price, na.rm = T),
+                mSe = mean(Se, na.rm = T),
+                mSrz5 = mean(Srz5, na.rm = T),
+                mip5 = mean(ip5, na.rm = T),
+                mSrz30 = mean(Srz30, na.rm = T),
+                mip30 = mean(ip30, na.rm = T),
+                mSrz60 = mean(Srz60, na.rm = T),
+                mip60 = mean(ip60, na.rm = T))
+    pre_subtabla_vii <- rbind(pre_subtabla_vii, pre_tabla_vi_day)
+  }
+  pre_tabla_vii[[d]] <- pre_subtabla_vii
+  rownames(pre_tabla_vii[[d]]) <- day
+  rm(d, t, pre_tabla_vi_day, pre_subtabla_vii)
+}
+
+tabla_vii <- data.frame()
+for (d in 1:length(pre_tabla_vii)){
+  pre_tabla_vii[[d]] <- pre_tabla_vii[[d]] %>%
+    mutate(mrSe = mSe/mprice,
+           mrSrz5 = mSrz5/mprice,
+           mrip5 = mip5/mprice,
+           mrSrz30 = mSrz30/mprice,
+           mrip30 = mip30/mprice,
+           mrSrz60 = mSrz60/mprice,
+           mrip60 = mip60/mprice)
+  row <- pre_tabla_vii[[d]] %>%
+    summarise(mmSe = mean(mSe, na.rm = T),
+              mmSrz5 = mean(mSrz5, na.rm = T),
+              mmip5 = mean(mip5, na.rm = T),
+              mmSrz30 = mean(mSrz30, na.rm = T),
+              mmip30 = mean(mip30, na.rm = T),
+              mmSrz60 = mean(mSrz60, na.rm = T),
+              mmip60 = mean(mip60, na.rm = T),
+              mmrSe = mean(mrSe, na.rm = T),
+              mmrSrz5 = mean(mrSrz5, na.rm = T),
+              mmrip5 = mean(mrip5, na.rm = T),
+              mmrSrz30 = mean(mrSrz30, na.rm = T),
+              mmrip30 = mean(mrip30, na.rm = T),
+              mmrSrz60 = mean(mrSrz60, na.rm = T),
+              mmrip60 = mean(mrip60, na.rm = T))
+  tabla_vii <- rbind(tabla_vii, row)
+}
+rownames(tabla_vii) <- paste0("Stock",idx)
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_vii[,1:7] %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla VI", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA LA TABLA VI-
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_vii[,8:14] %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla VII", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA LA TABLA VII-
+
+Ahora se aplica el test de Wilcoxon sobre las medidas calculadas.
+
+```{r}
+# Test de Wilcoxon 5
+wilcoxont5 <- vector(mode = "list", length = length(idx2))
+
+for (c in 1:length(idx2)){
+  subwilcoxont5 <- data.frame()
+  for (d in 1:length(idx2[[c]])){
+    pre_tabla_vii2 <- pre_tabla_vii
+    rownames(pre_tabla_vii2[[which(idx==idx2[[c]][d])]]) <- 
+      paste0("day.", day, ".St", idx[which(idx==idx2[[c]][d])])
+    portion <- pre_tabla_vii2[[which(idx==idx2[[c]][d])]]
+    subwilcoxont5 <- rbind(subwilcoxont5, portion)
+  }
+  wilcoxont5[[c]] <- subwilcoxont5
+  rm(c, d, pre_tabla_vii2, subwilcoxont5, portion)
+}
+
+wilcoxtable5 <- data.frame(aux = rep(NA, ncol(wilcoxont5[[1]])))
+for (c in 1:length(pairs)){
+  subwilcoxtable5 <- data.frame()
+  for (r in 1:(ncol(wilcoxont5[[c]]))){
+    x <- wilcoxont5[[pairs[[c]][1]]][, r]
+    y <- wilcoxont5[[pairs[[c]][2]]][, r]
+    pvalue <- wilcox.test(x, y, alternative = "two.sided", paired = F)$p.value
+    pvalue <- data.frame(pick = pvalue)
+    subwilcoxtable5 <- rbind(subwilcoxtable5, pvalue)
+  }
+  wilcoxtable5 <- cbind(wilcoxtable5, subwilcoxtable5)
+  rm(c, r, x, y, pvalue, subwilcoxtable5)
+}
+wilcoxtable5 <- wilcoxtable5[, 2:4]
+rownames(wilcoxtable5) <- colnames(pre_tabla_vii[[1]])
+colnames(wilcoxtable5) <- c("Gran_vs_Med", "Gran_vs_Peq", "Med_vs_Peq")
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = format(wilcoxtable5, scientific = T) %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Contrastes de Wilcoxon", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VAN LOS CONTRASTES DE WILCOXON 2-
+
+# 3. Comentario de los resultados

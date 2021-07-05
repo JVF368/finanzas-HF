@@ -1,0 +1,904 @@
+---
+title: "Tarea 2 - Medidas de liquidez"
+author: "Jordi Vanrell Forteza"
+date: "26/5/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, include = T, message = F, warning = F, cache = T)
+```
+
+La tarea requiere escoger aleatoriamente tres archivos de cada uno de los tres grupos provistos. Los grupos se corresponden con acciones de capitalización pequeña (nombrados _Stock20x.txt_), media (_Stock10x.txt_) y grande (_Stockx.txt_). Los ficheros contienen datos para tres semanas del libro de órdenes (LOB) de activos negociados en el NASDAQ. La primera semana es del 7 al 11 de abril de 2008, la segunda (la semana de la crisis) es la del 15 al 19 de septiembre y la tercera es la del 12 al 16 de febrero de 2010. Se descargan todos y se meten en un mismo directorio. Se seleccionan aleatoriamente tres números entre 1 y 5 que marcarán la elección de las acciones en los tres grupos. Se leen con un bucle y se almacenan los nueve en una lista.
+
+```{r}
+# Se escogen 3 acciones de cada grupo (al azar)
+set.seed(603) # semilla para completa reproducibilidad
+idx <- as.character(sample(1:5, size = 3, replace = F))
+idx <- c(paste0("", idx), paste0("10", idx), paste0("20", idx))
+idx2 <- list(idx[1:3], idx[4:6], idx[7:9])
+
+LOB <- vector(mode = "list", length = length(idx))
+for (i in idx){ # Bucle de lectura de los archivos; se almacenan en lista
+  LOB[[which(idx==i)]] <- read.table(paste0("Stock", i, "LOB.txt"), header = T)
+  rm(i)
+}
+```
+
+Dicha lista consiste en 9 tablas de datos ordenadas según el índice de posición del vector `idx`: 5, 3, 1, 105, 103, 101, 205, 203 y 201.
+
+# 1. Programario para el cálculo de las medidas de liquidez.
+```{r}
+require(tidyverse) # Paquete para la manipulación de de data frames
+require(lubridate) # Paquete para la manipulación de fechas
+```
+
+En este punto se requiere el desarrollo de un programa:
+
+a. para calcular la horquilla relativa media ponerada en puntos básicos para *round-trips* de 100, 500 y 1000 acciones considerando la profunidad oculta total.
+
+b. para calcular el logaritmo de la profundidad acumulada en euros en el lado *ask* del LOB a distancias de 1, 5, 10 y 20 *ticks* (0.01 $).
+
+Se arma un bucle dentro del cual se procederá al cálculo de todas las magnitudes indicadas, por minuto y para cada uno de los activos. Las funciones internas calculan, por orden, el precio medio ponderado en el ask y bid y, con este, la horquilla media ponerada para cada *round trip* y la profundidad acumulada del ask para cada distancia. Los datos para las horquillas y las profundidades se acumulan separadamente en dos listas, con una tabla por activo en cada una de ellas.
+
+```{r}
+# Subtabla 1 Horquilla, tabla_i_ext (9 subtablas)
+tabla_i_ext <- vector(mode = "list", length = length(LOB))
+# Subtabla 2 Profunidad, tabla_i_ext2 (9 subtablas)
+tabla_i_ext2 <- vector(mode = "list", length = length(LOB))
+
+for (d in 1:length(LOB)){
+  LOB[[d]] <- LOB[[d]] %>%
+    mutate(vol = hvol + dvol, # se suman el volumen mostrado y el oculto
+           datime = ymd(date) + hms("09:30:00") + time - 34200) # fecha y hora
+  minute <- unique(LOB[[d]]$datime) # se extrae un vector con los minutos
+  subtabla_i_ext <- data.frame() # se inicializan los data.frames depositarios
+  subtabla_i_ext2 <- data.frame()
+  for (t in 1:length(minute)){
+    LOB_q <- LOB[[d]] %>%
+      filter(datime == minute[t]) # filtra el libro de órdenes según minuto
+    # Cálculo de los puntos medios:
+    q <- (LOB_q$quote[LOB_q$sign == 1] + LOB_q$quote[LOB_q$sign == -1])/2
+    ab <- function(part, rt_amt){
+      # Función de cálculo del precio medio ponderado ask/bid
+      # INPUTS:
+      # part debe tomar valores -1 (ask) o 1 (bid)
+      # rt_amt es la cantidad de acciones del round trip.
+      # OUTPUTS:
+      # q_rt: el precio medio ask/bid del round-trip.
+      LOB_partmin <- LOB[[d]] %>%
+        # filtra por minuto y signo de la transacción
+        filter(datime == minute[t] & sign*part > 0) %>%
+        arrange(abs(sign)) # ordena según prioridad de las operacions
+      vol <- LOB_partmin$vol # se vectorizan los volúmenes...
+      quote <- LOB_partmin$quote # ...y los precios
+      # se inicializa un vector para almacenar los volúmenes del round-trip:
+      vol_rt <- c() 
+      for (i in 1:length(vol)){
+        # El bucle almacena en el vector anterior la cantidad de acciones
+        # del round-trip a cada precio diferente. El 0 en la func max
+        # asegura que no tomará valores negativos cuando el round-trip se
+        # haya completado.
+        vol_rt[i] <- max(min(rt_amt-sum(vol[0:(i-1)]), vol[i]), 0)
+      }
+      # Si el round-trip no se ha completado devuelve NA.
+      q_rt <- ifelse(sum(vol_rt) < rt_amt, NA, sum(vol_rt*quote)/sum(vol_rt))
+      return(q_rt)
+    }
+    s <- function(rt_amt){
+      # Función de cálculo de la horquilla relativa media ponderada
+      # INPUTS:
+      # rt_amt: ídem que en función ab
+      # OUTPUTS: horquilla relativa media ponerada en puntos básicos
+      (log(ab(-1, rt_amt)) - log(ab(1, rt_amt)))*10000
+    }
+    a_tick <- function(part, ticks, tick){
+      # Función de cálculo de la profundidad:
+      # INPUTS:
+      # part ídem que en func ab; para ask es -1
+      # ticks: número de ticks
+      # tick: magnitud de cada tick (0.01 $)
+      # OUTPUT:
+      # logaritmo de las unidades monetarias totales.
+      LOB_partmin <- LOB[[d]] %>%
+        filter(datime == minute[t] & sign*part > 0) %>%
+        arrange(abs(sign))
+      vol <- LOB_partmin$vol
+      quote <- LOB_partmin$quote # Estas 5 líneas son análogas en la func ab.
+      vol_tick <- c() 
+      for (i in 1:length(vol)){
+        # El bucle busca todos los precios menores o iguales a q+(tick*ticks)
+        # y devuelve los volúmenes asociados a estos. En caso de no existir
+        # ningún volumen devuelve 0.
+        vol_tick[i] <- ifelse(quote[i] <= q+(tick*ticks), vol[i], 0)
+      }
+      # La función devuelve el logaritmo de las unidades monetarias totales,
+      # resultado de multiplicar el volumen de acciones hasta ese precio por
+      # sus respectivos precios. El 0 en la func max censura los -Inf que 
+      # resultan de aplicar logaritmos cuando no existe volumen a ese tick.
+      return(max(log(sum(vol_tick*quote)), 0))
+    }
+    # en cell3 se almacenan los resultados de aplicar la función s de cálculo
+    # de la horquilla con los parámetros deseados.
+    cell3 <- data.frame(rt_100 = s(100), rt_500 = s(500), rt_1000 = s(1000))
+    # Acumula los resultados por minuto:
+    subtabla_i_ext <- rbind(subtabla_i_ext, cell3)
+    # En cell4 se almacenan los resultados de la función a_tick de cálculo
+    # de la profundidad con los parámetros deseados.
+    cell4 <- data.frame(tick_1 = a_tick(-1, 1, .01),
+                        tick_5 = a_tick(-1, 5, .01),
+                        tick_10 = a_tick(-1, 10, .01),
+                        tick_20 = a_tick(-1, 20, .01))
+    # Acumula los resultados por minuto:
+    subtabla_i_ext2 <- rbind(subtabla_i_ext2, cell4)
+  }
+  # Se almacenan las tablas resultados en lista, convenientemente renombradas
+  # las filas.
+  tabla_i_ext[[d]] <- subtabla_i_ext
+  rownames(tabla_i_ext[[d]]) <- minute
+  tabla_i_ext2[[d]] <- subtabla_i_ext2
+  rownames(tabla_i_ext2[[d]]) <- minute
+  cat(paste0("Stock",idx[d]," completado. ")) # Muestra progreso en pantalla.
+  rm(d, t, ab, a_tick, s, q, minute, cell3, cell4, 
+     subtabla_i_ext, subtabla_i_ext2, LOB_q)
+}
+```
+
+Tras efectuar los cálculos se han observado algunos valores negativos (o ceros) en las horquillas de algunos minutos. Buscando los datos originales se ha observado que estas se corresponden con momentos puntuales en las que el mejor ask se situaba por debajo del mejor bid (o al mismo nivel). Estas reflejan situaciones transitorias anómalas en las que no se había consolidado el LOB y, por ello, se prescinde de dichas observaciones (en total 4 observaciones entre los 9 activos).
+
+```{r}
+for (i in 1:length(tabla_i_ext)){
+  # Con este bucle se limpia la tabla tabla_i_ext de todos aquellos registros
+  # que contengan algún valor negativo de horquilla. Se conservan NA.
+  tabla_i_ext[[i]] <- tabla_i_ext[[i]] %>% 
+    filter((rt_100 > 0 & rt_500 > 0 & rt_1000 > 0) | 
+             (rt_100 > 0 & rt_500 > 0 & is.na(rt_1000)) | 
+             (rt_100 > 0 & is.na(rt_500) & rt_1000 > 0) | 
+             (is.na(rt_100) & rt_500 > 0 & rt_1000 > 0) |
+             (rt_100 > 0 & is.na(rt_500) & is.na(rt_1000)) |
+             (is.na(rt_100) & rt_500 > 0 & is.na(rt_1000)) |
+             (is.na(rt_100) & is.na(rt_500) & rt_1000 > 0) |
+             (is.na(rt_100) & is.na(rt_500) & is.na(rt_1000)))
+  rm(i)
+}
+```
+
+# 2. Medias de las medidas de liquidez y significatividad de las diferencias
+
+En este apartado se demandan:
+
+* Los promedios de los medias diarias de las medidas de liquidez calculadas en 1 desglosadas por activo y cruzadas or submuestras según grado de capitalización bursátil.
+
+* La realización de constrastes estadísticos que permitan valorar la significatividad de las diferencias diarias entre submuestras según capitalización.
+
+* Análisis de las diferencias en las medidas entre la semana de la crisis y las otras dos.
+
+## 2.1. Promedios de las medidas de liquidez por activo y submuestras.
+
+En primera instancia, y siguiendo las indicaciones del enunciado, a través de un bucle, se hacen las medias diarias de las medidas de liquidez calculadas en 1. Para ello, para cada par de tablas correspondientes a un mismo activo, se genera una variable para la fecha en formato día/mes/año, se agrupan los datos por fecha y se calculan las medias. Los resultados se almacenan en un par de listas análogas a las del apartado 1.
+
+Posteriormente se construye una función que promedia las medias diarias de las medidas de liquidez tomando como parámetros la primera y la última posición de los activos que pretenden agregarse tal como se ordenan en el vector `idx`. Luego se aplica la función en bucle de forma que, al acabar con todos los activos de una submuestra, calcula los valores para la submuestra en conjunto.
+
+```{r}
+# En estas listas se almacenan las medias diarias de horquillas y profundidades.
+tabla_i_sum <- vector(mode = "list", length = length(LOB))
+tabla_i_sum2 <- vector(mode = "list", length = length(LOB))
+
+for (i in 1:length(LOB)){
+  # Se genera la variable date (fecha) para cada una de los activos.
+  tabla_i_ext[[i]]$date <- as.Date(rownames(tabla_i_ext[[i]]))
+  tabla_i_ext2[[i]]$date <- as.Date(rownames(tabla_i_ext2[[i]]))
+  tabla_i_sum[[i]] <- tabla_i_ext[[i]] %>%
+    group_by(date) %>% # agrupa por fecha (día) y genera las medias
+    summarise(mean_s_rt_100 = mean(rt_100, na.rm = T),
+              mean_s_rt_500 = mean(rt_500, na.rm = T),
+              mean_s_rt_1000 = mean(rt_1000, na.rm = T))
+  tabla_i_sum2[[i]] <- tabla_i_ext2[[i]] %>%
+    group_by(date) %>% # idem.
+    summarise(mean_tick_1 = mean(tick_1, na.rm = T),
+              mean_tick_5 = mean(tick_5, na.rm = T),
+              mean_tick_10 = mean(tick_10, na.rm = T),
+              mean_tick_20 = mean(tick_20, na.rm = T))
+  rm(i)
+}
+
+summarizer <- function(first, last){
+  # Función que resume la información de las medias diarias:
+  # INPUTS:
+  # first: orden del primer activo a considerar
+  # last: orden del último activo a considerar
+  # Cuando first == last recoge solamente el de ese activo.
+  # OUTPUTS:
+  # sum: data.frame con las medias de las medidas de liquidez
+  sum <- data.frame()
+  for (i in first:last){
+    summary <- merge(tabla_i_sum[[i]], tabla_i_sum2[[i]])
+    sum <- rbind(sum, summary)
+  }
+  sum <- sum %>% # Se resume la información de los activos considerados
+    summarise(mean_s_rt_100 = round(mean(mean_s_rt_100), 3),
+              mean_s_rt_500 = round(mean(mean_s_rt_500), 3),
+              mean_s_rt_1000 = round(mean(mean_s_rt_1000), 3),
+              mean_tick_1 = round(mean(mean_tick_1), 3),
+              mean_tick_5 = round(mean(mean_tick_5), 3),
+              mean_tick_10 = round(mean(mean_tick_10), 3),
+              mean_tick_20 = round(mean(mean_tick_20), 3))
+  rownames(sum) <- ifelse(first == last, paste0("Stock",idx[first]), 
+                          paste0("Stocks",idx[first],"-",idx[last]))
+  return(sum)
+}
+
+tabla_i <- data.frame()
+stops <- c(3, 6, 9)
+for (i in 1:length(LOB)){ # Bucle para generar tabla_i
+  tabla_i <- rbind(tabla_i, summarizer(i,i))
+  if(i %in% stops){ 
+    # Tras los activos #3, #6, #9 (últimos de su grado de capitalización)
+    # el bucle genera, además, los estadísticos de los activos agregados
+    # (por grado de capitalización)
+    tabla_i <- rbind(tabla_i, summarizer(i-2,i))
+  }
+  rm(i)
+}
+```
+
+En la Tabla I se disponen los promedios tal como se han especificado. En las filas se disponen los activos y sus agregaciones por submuestras, en las columnas se listan las medidas de liquidez.
+
+```{r, eval=FALSE}
+# Por cuestiones de compilación la tabla (esta y las siguientes) se ha generado de forma separada,de acuerdo con el código que sigue. Este es un código que NO puede compilarse en Rmd.
+library(officer)
+library(flextable)
+library(magrittr)
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_i %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla I", style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA I-
+
+## 2.2. Significatividad de las diferencias entre submuestras
+
+En segundo lugar se pide la realización de contrastes de significatividad de las diferencias en los datos de medias diarias de las medidas de liquidez entre las submuestras de activos según el grado de capitalización. Antes de efectuar los contrastes, por tanto, es necesario sacar las medias diarias de las medidas de liquidez para cada submuestra. Los datos se almacenan en una lista de 3 tablas, una por submuestra.
+
+```{r}
+# Se almacenan en lista los estadísticos de cada submuestra.
+tabla_i_cs <- vector(mode = "list", length = length(LOB)/length(stops))
+
+for (i in 1:length(idx2)){
+  agg <- data.frame()
+  agg2 <- data.frame()
+  for (j in 1:length(idx2[[i]])){
+    # El bucle agrega según la numeración de subconjuntos especificada en idx2
+    agg <- rbind(agg, tabla_i_sum[[which(idx == idx2[[i]][j])]])
+    agg2 <- rbind(agg2, tabla_i_sum2[[which(idx == idx2[[i]][j])]])
+  }
+  agg <- agg %>%
+    group_by(date) %>%
+    # una vez tiene agregados los subconjuntos agrupa por fecha (día) y calcula
+    # las medias.
+    summarise(mean_s_rt_100 = mean(mean_s_rt_100),
+              mean_s_rt_500 = mean(mean_s_rt_500),
+              mean_s_rt_1000 = mean(mean_s_rt_1000))
+  agg2 <- agg2 %>% # idem
+    group_by(date) %>%
+    summarise(mean_tick_1 = mean(mean_tick_1),
+              mean_tick_5 = mean(mean_tick_5),
+              mean_tick_10 = mean(mean_tick_10),
+              mean_tick_20 = mean(mean_tick_20))
+  # se juntan las tablas de horquillas y profundidad:
+  tabla_i_cs[[i]] <- merge(agg, agg2)
+  rm(i, j, agg, agg2)
+}
+```
+
+Como hay activos con tres grados de capitalización se aplica el *rank-sum test de Wilcoxon* por pares (es decir, con todas las combinaciones posibles de 2 subuestras). Este test contrasta la hipótesis nula de que las medianas de dos distribuciones de valores son iguales contra la alternativa, que postula lo contrario. Se toma el nivel de significación del 5%, con lo que un p-valor del contraste por debajo de 0.05 implica que se rechaza la hipótesis nula de igualdad de medianas.
+
+```{r}
+var <- colnames(tabla_i_cs[[1]])[2:8]
+# 3 combinaciones posibles de los 3 subconjuntos:
+pairs <- list(c(1, 2), c(1, 3), c(2, 3))
+cap <- c("Gran", "Med", "Peq")
+
+# inicializa data.frame con una columna de 7 NAs (7 es el número de medidas)
+# Solo es necesaria para dar dimensión al data.frame.
+Wilcox_p <- data.frame(rep(NA, 7)) 
+for (i in 1:length(pairs)){
+  Wilcox_sub <- data.frame()
+  for (j in 1:length(var)){
+    # Para cada variable de cada combinación de los 3 subconjuntos calcula el
+    # p-valor según la prueba de Wilcoxon.
+    x <- tabla_i_cs[[pairs[[i]][1]]][, var[j]]
+    y <- tabla_i_cs[[pairs[[i]][2]]][, var[j]]
+    pvalue <- wilcox.test(x, y, alternative = "two.sided", paired = F)$p.value
+    pvalue <- data.frame(pvalue) # lo mete en data.frame.
+    Wilcox_sub <- rbind(Wilcox_sub, pvalue) # agrega los valores
+  }
+  # Bautiza la combinación de subconjuntos:
+  colnames(Wilcox_sub) <- paste0("Cap-", cap[pairs[[i]][1]], "-", cap[pairs[[i]][2]])
+  Wilcox_p <- cbind(Wilcox_p, Wilcox_sub) # guarda los resultados.
+  rm(i, j, x, y, Wilcox_sub, pvalue)
+}
+Wilcox_p <- Wilcox_p[,2:4] # descarta la columna accesoria de NAs 
+# Se nombran las filas para conservar la correspondencia con los p-valores.
+rownames(Wilcox_p) <- var 
+```
+
+Los resultados (p-valores) se muestran en la tabla siguiente:
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = Wilcox_p %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla P - Grado de capitalización", 
+                  style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA P-
+
+## 2.3. ¿Cómo afectó a la liquidez la semana de la crisis?
+
+Igual que en 2.2. se contrastó la igualdad de medianas entre grados de capitalización sin discernir semana, puede contrastarse también el efecto que la crisis tuvo sobre las medidas de liquidez. Como paso previo se reorganizan las observaciones diarias según las dimensiones semana y capitalización (9 grupos) y luego se contrasta la igualdad de medianas para cada submuestra según capitalización.
+
+```{r}
+tabla_i_cs_week <- matrix(vector(mode = "list", length = 1), nrow = 3, ncol = 3)
+# Esta vez se acumulan las tablas en una "matriz de listas de tablas"
+# En las filas coloca los activos por capitalización
+# En las columnas coloca los activos por semana
+for (i in 1:length(tabla_i_cs)){
+  # Se genera una variable para conocer la semana del registro.
+  # Es conveniente usar isoweek para semanas lunes-domingo.
+  # Se agrega el año al final; 38-2008 es la semana 38 de 2008.
+  tabla_i_cs[[i]]$week <- paste0(isoweek(tabla_i_cs[[i]]$date), "-", year(tabla_i_cs[[i]]$date))
+  weeks <- unique(tabla_i_cs[[i]]$week)
+  for (w in 1:length(weeks)){
+    # Básicamente convierte los 3 data.frames de las medias de los subconjuntos
+    # en 9, dividiéndolos según semanas.
+    group_week <- tabla_i_cs[[i]] %>%
+      filter(week == weeks[w])
+    tabla_i_cs_week[i,w][[1]] <- group_week
+  }
+  rm(i, w, group_week)
+}
+
+tabla_i_week_wilcox <- vector(mode = "list", length = length(cap))
+
+for (c in 1:length(cap)){ # Por cada grado de capitalización...
+  subtabla_i_week_wilcox <- data.frame(rep(NA, 7))
+  for (i in 1:length(pairs)){ # Por cada una de las parejas de semanas...
+    Wilcox_sub <- data.frame()
+    for (j in 1:length(var)){ # Por cada variable...
+      # Análogo al bucle ante-anterior
+      x <- tabla_i_cs_week[c, pairs[[i]][1]][[1]][, var[j]]
+      y <- tabla_i_cs_week[c, pairs[[i]][2]][[1]][, var[j]]
+      pvalue <- wilcox.test(x, y, alternative = "two.sided", paired = F)$p.value
+      pvalue <- data.frame(pvalue)
+      Wilcox_sub <- rbind(Wilcox_sub, pvalue)
+    }
+    colnames(Wilcox_sub) <- paste0(weeks[pairs[[i]][1]], "_vs_", weeks[pairs[[i]][2]])
+    subtabla_i_week_wilcox <- cbind(subtabla_i_week_wilcox, Wilcox_sub)
+  }
+  subtabla_i_week_wilcox <- subtabla_i_week_wilcox[,2:4]
+  rownames(subtabla_i_week_wilcox) <- var
+  tabla_i_week_wilcox[[c]] <- subtabla_i_week_wilcox
+  rm(c, i, j, x, y, pvalue, subtabla_i_week_wilcox, Wilcox_sub)
+}
+```
+
+Los resultados (p-valores) se muestran en las tablas siguientes:
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_i_week_wilcox[[1]] %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla Q.1 - Act. de Gran Capitalización", 
+                  style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA Q.1.-
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_i_week_wilcox[[2]] %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla Q.2 - Act. de Capitalización media", 
+                  style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA Q.2.-
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_i_week_wilcox[[3]] %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla Q.3 - Act. de Capitalización pequeña", 
+                  style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA Q.3.-
+
+Como se observa, para los activos de todo tipo de capitalización las semanas resultan en general muy diferentes entre ellas. Sin embargo, la semana de la crisis es muy diferente a las demás excepto para la profundidad de 20 ticks (para los activos de capitalización pequeña, tabla Q.3.) y para la horquilla de 500 round-trips en los activos de gran capitalización (tabla Q.1.).
+
+# 3. Evolución intradía de las medidas de liquidez
+
+En este apartado se piden:
+
+* Las medias diarias de de la horquilla relativa media para *round-trips* de 100 y 1000 acciones y la profundidad media por el lado del  *ask* a 5 y 20 *ticks* del punto medio para cada activo e intervalo de 15 minutos.
+
+* Análisis de las diferencias en las medidas entre la semana de la crisis y las otras dos, según los parámetros del apartado anterior.
+
+## 3.1. Medidas de liquidez media por activo e intervalo de 15 minutos
+
+La liquidez media por activo e intervalo de 15 minutos puede calcularse a partir de los datos por minuto calculados en el apartado 1. El procedimiento consiste en generar una variable que recoja el cuarto de hora superior más próximo del minuto (todavía sin agrupar los diferentes días) y, tras agrupar según esta, calcular la media de los 15 minutos. Con posterioridad, y para cada activo, se extrae de esta la hora y el minuto (excluyendo día, mes y año) y, tras agrupar de nuevo, se recalculan las medias diarias por intervalo.
+
+```{r}
+# Se inicializa una lista donde se almacenarán los resultados
+tabla_i_sumquart <- vector(mode = "list", length = length(tabla_i_ext))
+
+for (i in 1:length(tabla_i_ext)){
+  rt_15 <- tabla_i_ext[[i]] %>%
+    # Se calculan las horquillas para round-trips de 100 y 1000 como la media
+    # de los datos por minuto. Para ello se genera una variable que redondea
+    # la observación (minuto, información presente en el nombre de las filas) 
+    # a su cuarto de hora superior más próximo.
+    mutate(ceil_date_15 = 
+             ceiling_date(ymd_hms(rownames(tabla_i_ext[[i]])), 
+                                       unit = "15 minutes")) %>%
+    group_by(ceil_date_15) %>% # se agrupa por cuarto de hora redondeado
+    summarise(mean_rt_100 = mean(rt_100, na.rm = T), # cálculo de medias
+              mean_rt_1000 = mean(rt_1000, na.rm = T))
+  tick_15 <- tabla_i_ext2[[i]] %>%
+    # Mismoprocedimiento para las medidas de profundidad
+    mutate(ceil_date_15 = ceiling_date(ymd_hms(rownames(tabla_i_ext2[[i]])), 
+                                       unit = "15 minutes")) %>%
+    group_by(ceil_date_15) %>%
+    summarise(mean_tick_5 = mean(tick_5),
+              mean_tick_20 = mean(tick_20))
+  tabla_i_sumquart[[i]] <- merge(rt_15, tick_15)
+  rm(i, rt_15, tick_15)
+}
+
+# Se inicializa una lista donde se almacenarán los resultados
+tabla_i_quartday <- vector(mode = "list", length = length(tabla_i_sumquart))
+
+for (i in 1:length(tabla_i_sumquart)){
+  resume <- tabla_i_sumquart[[i]] %>%
+    # Se genera una variable hora:minuto extrayendo la información con
+    # funciones de lubridate y agregándolas como concatenaciones.
+    mutate(ceil_quarter = hm(paste0(hour(ceil_date_15), ":",
+                                    minute(ceil_date_15)))) %>%
+    group_by(ceil_quarter) %>% # se agrupa por hora:minuto
+    # Luego calcula las medias de los grupos.
+    summarise(horq_med100 = mean(mean_rt_100),
+              horq_med1000 = mean(mean_rt_1000),
+              profund_med5 = mean(mean_tick_5),
+              profund_med20 = mean(mean_tick_20))
+  tabla_i_quartday[[i]] <- resume # se almacenan resultados.
+  rm(i, resume)
+}
+```
+
+Para representar la información gráficamente se hace necesario convertir a numérica la variable del cuarto de hora superior.
+
+```{r}
+require(cowplot)
+fill_color <- c("cornflowerblue", "dodgerblue4", "green3", "forestgreen")
+for (i in 1:length(tabla_i_quartday)){
+  tabla_i_quartday[[i]]$ceil_quarter <-
+    as.numeric(tabla_i_quartday[[i]]$ceil_quarter, "hours")
+  rm(i)
+}
+```
+
+Como la información completa recorre cuatro medidas de nueve activos, se ha optado por representarla en una composición de nueve gráficos, en cada uno de los cuales se incluye la evolución intradía de sus cuatro medidas de liquidez (cuatro gráficos de líneas). Por lo que respecta al código, se define una función marco para cada gráfico y luego se pule la representación de cada uno de ellos en la composición.
+
+```{r}
+sub_graf <- function(data, trans){
+  ggplot(data = data) +
+    geom_line(aes(x = ceil_quarter, y = horq_med100, color = "horq_med100"), 
+              alpha = .5, linetype = 1, size = .75) +
+    geom_line(aes(x = ceil_quarter, y = horq_med1000, color = "horq_med1000"), 
+              alpha = .5, linetype = 1, size = .75) +
+    geom_line(aes(x = ceil_quarter, y = profund_med5/trans, 
+                  color = "profund_med5"), 
+              alpha = .5, linetype = 2, size = .75) +
+    geom_line(aes(x = ceil_quarter, y = profund_med20/trans, 
+                  color = "profund_med20"), 
+              alpha = .5, linetype = 2, size = .75) +
+    scale_colour_manual("", breaks = c("horq_med100", "horq_med1000",
+                                       "profund_med5", "profund_med20"),
+                        values = c(fill_color[1], fill_color[2], 
+                                   fill_color[3], fill_color[4])) +
+    theme(plot.title = element_text(hjust = .5)) +
+    scale_y_continuous(sec.axis = sec_axis(trans = ~.*trans)) +
+    ylab("Horquilla") +
+    xlab("Hora")
+}
+
+legend <- get_legend(sub_graf(tabla_i_quartday[[1]], 1) + theme(legend.position = "bottom"))
+
+plot_grid(plot_grid(sub_graf(tabla_i_quartday[[1]], 2) + xlab("") + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[1])), 
+                    sub_graf(tabla_i_quartday[[2]], 2) + xlab("") + 
+                      ylab("") + theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[2])), 
+                    sub_graf(tabla_i_quartday[[3]], 1) + xlab("") + 
+                      ylab("") + scale_y_continuous(sec.axis = 
+                                                      sec_axis(trans = ~.*1, name = "Profundidad")) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[3])),
+                    sub_graf(tabla_i_quartday[[4]], .25) + xlab("") + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[4])), 
+                    sub_graf(tabla_i_quartday[[6]], .25) + xlab("") + 
+                      ylab("") + theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[5])), 
+                    sub_graf(tabla_i_quartday[[6]], .25) + xlab("") + 
+                      ylab("") + scale_y_continuous(sec.axis = 
+                                                      sec_axis(trans = ~.*.25, name = "Profundidad")) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[6])),
+                    sub_graf(tabla_i_quartday[[7]], .05) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[7])), 
+                    sub_graf(tabla_i_quartday[[8]], .05) + 
+                      ylab("") + theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[8])), 
+                    sub_graf(tabla_i_quartday[[9]], .05) + ylab("") + 
+                      scale_y_continuous(sec.axis = sec_axis(trans = ~.*.05, name = "Profundidad")) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Stock",idx[9])), 
+                    nrow = 3), legend, nrow = 2, rel_heights = c(0.95, 0.05))
+```
+
+-AQUÍ VA LA FIGURA 1-
+
+En la Figura 1 se aprecia la evolución de las medidas de liquidez para los 9 activos. Los gráficos para cada uno de ellos se organizan por grados de capitalización en las filas. En cada gráfico, la variable tiempo está en el eje de las X; las medidas de horquilla están escaladas según el eje Y izquierdo y las de profundidad según el Y derecho.
+
+En general se aprecia que la profundidad relativa es menor cuanto menor es el grado de capitalización. En la evolución intradía se aprecia, en general, un valor más bajo al principio de la jornada y una tendencia ligeramente ascendente hacia el final de esta. En cuanto a la horquilla relativa media, los valores son tanto más altos cuanto más grande es el grad de capitalización. En la evolución intradía la horquilla empieza ancha al inicio de loa jornada y, tras bajar rápidamente durante la mañana, se estabiliza hasta el final de la sesión.
+
+## 3.2. ¿Cómo afectó la semana de la crisis a la evolución de la liquidez intradía?
+
+En este subapartado se pretende comprobar, de manera visual, cómo afectó la crisis a la evolución intradía de las medidas de liquidez. Para ello se efectúa un ejercicio similar al de 3.1., pero con la información de los activos reorganizada según semana y grado de capitalización. Los datos de partida son los datos originales agrupados por cuarto de hora, distinguiendo días.
+
+```{r}
+for (i in 1:length(tabla_i_sumquart)){ # Genera la var week para cada activo
+  tabla_i_sumquart[[i]] <- tabla_i_sumquart[[i]] %>%
+    # Se genera las variables para la semana y hora:minuto con
+    # funciones de lubridate.
+    mutate(week = paste0(isoweek(tabla_i_sumquart[[i]]$ceil_date_15), "-", 
+                         year(tabla_i_sumquart[[i]]$ceil_date_15)),
+           ceil_quarter = hm(paste0(hour(ceil_date_15), ":",
+                                    minute(ceil_date_15))),
+           ceil_quarter = as.numeric(ceil_quarter, "hours"))
+  rm(i)
+}
+```
+
+A partir de estos, y contando con las variables semana y hora:minuto generadas con `lubridate`, se procede a reorganizar la información según semana y hora:minuto.
+
+```{r}
+# Se arma una matriz de listas con los grados de capitalización en las filas 
+# y semanas en las columnas
+tabla_i_weekhour <- matrix(vector(mode = "list", length = 1), 
+                           nrow = 3, ncol = 3)
+for (i in 1:length(idx2)){ # Por cada grado de capitalización
+  for (w in 1:length(weeks)){ # Por cada semana
+    agg <- data.frame()
+    for (j in 1:length(idx2[[i]])){ # Por cada activo
+      # Filtra activos y semana
+      agg_med <- tabla_i_sumquart[[which(idx == idx2[[i]][j])]] %>%
+        filter(week == weeks[w])
+      agg <- rbind(agg, agg_med)
+    }
+    agg <- agg %>%
+      group_by(ceil_quarter) %>% # Se agrupa por cuarto de hora
+      # Se sacan las medias
+      summarise(horq_med100 = mean(mean_rt_100),
+                horq_med1000 = mean(mean_rt_1000),
+                profund_med5 = mean(mean_tick_5),
+                profund_med20 = mean(mean_tick_20))
+    tabla_i_weekhour[i,w][[1]] <- agg # Se agrega a posición en matriz
+  }
+  rm(i, j, w, agg_med, agg)
+}
+```
+
+Luego se representa gráficamente, de forma análoga a como se ha hecho en el apartado 3.1. La función básica se ha definido también en ese apartado.
+
+```{r}
+plot_grid(plot_grid(sub_graf(tabla_i_weekhour[1, 1][[1]], 2) + xlab("") + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[1], ", ", weeks[1])), 
+                    sub_graf(tabla_i_weekhour[1, 2][[1]], 1) + xlab("") + 
+                      ylab("") + theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[1], ", ", weeks[2])), 
+                    sub_graf(tabla_i_weekhour[1, 3][[1]], 2) + xlab("") +
+                      ylab("") + scale_y_continuous(sec.axis = sec_axis(trans = ~.*2, name = "Profundidad")) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[1], ", ", weeks[3])),
+                    sub_graf(tabla_i_weekhour[2, 1][[1]], (1/3)) + xlab("") + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[2], ", ", weeks[1])), 
+                    sub_graf(tabla_i_weekhour[2, 2][[1]], (1/6)) + xlab("") + 
+                      ylab("") + theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[2], ", ", weeks[2])), 
+                    sub_graf(tabla_i_weekhour[2, 3][[1]], .75) + xlab("") + 
+                      ylab("") + scale_y_continuous(sec.axis = sec_axis(trans = ~.*.75, name = "Profundidad")) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[2], ", ", weeks[3])),
+                    sub_graf(tabla_i_weekhour[3, 1][[1]], .05) + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[3], ", ", weeks[1])), 
+                    sub_graf(tabla_i_weekhour[3, 2][[1]], .025) + ylab("") + 
+                      theme(legend.position = "none") + 
+                      ggtitle(paste0("Cap. ", cap[3], ", ", weeks[2])), 
+                    sub_graf(tabla_i_weekhour[3, 3][[1]], .05) + ylab("") + 
+                      scale_y_continuous(sec.axis = sec_axis(trans = ~.*.05, name = "Profundidad")) + 
+                      ggtitle(paste0("Cap. ", cap[3], ", ", weeks[3])) +
+                      theme(legend.position = "none"), 
+                    nrow = 3), legend, nrow = 2, rel_heights = c(0.95, 0.05))
+```
+
+-AQUÍ VA LA FIGURA 2-
+
+De acuerdo con lo observado, no se aprecian grandes diferencias en la submuestra de gran capitalización, pero sí en las de capitalización media y, sobre todo, pequeña. En la submuestra de capitalización media las horquillas son ligeramentemente mayores; la diferencia se exacerba en la submuestra de capitalización pequeña. En cuanto a la profundidad, también se aprecian diferencias en la profundidad en las submuestras de capitalización media y pequeña: la semana de la crisis la profundidad era menor. Con todo lo anterior puede decirse que la semana de la crisis se incrementó la iliquidez del mercado tanto más como menor era el grado de capitalización.
+
+# 4. La importancia del volumen oculto en la provisión de liquidez
+
+En este apartado se inteará responder a:
+
+* ¿Qué proporción de la profunidad total del LOB está oculta?
+
+* ¿Hubo más volumen oculto durante la semana de la crisis?, ¿Hay diferencias en el uso de volumen oculto en función de la capitalización bursátil?
+
+* ¿Tienden a ocultarse más o menos cerca del punto medio?
+
+## 4.1. Proporción del volumen oculto en la profundidad total
+
+Para medir esta magnitud por activo se procede al cálculo de la profundidad total por las partes *ask* y *bid*, tanto del volumen total como del oculto. Las dos ratios del volumen oculto sobre el total (*ask* y *bid*) representan los porcentajes del volumen oculto en ese minuto en particular. Los datos por minuto se almacenan en una tabla y, con posterioridad, se calcula la media de la profundidad en cada lado del LOB. El promedio de estas dos medias representa la importancia del volumen oculto para ese activo en particular.
+
+```{r}
+# Subtabla Profunidad, tabla_ii_sub1 (9 subtablas)
+tabla_ii_sub1 <- vector(mode = "list", length = length(LOB))
+
+for (d in 1:length(LOB)){
+  minute <- unique(LOB[[d]]$datime) # se extrae un vector con los minutos
+  subtabla_ii_sub1 <- data.frame() # se inicializa data.frame depositario
+  for (t in 1:length(minute)){
+    total_deep <- function(part){
+      # part es el parámetro para ask y bid; para ask es -1
+      LOB_partmin <- LOB[[d]] %>%
+        filter(datime == minute[t] & sign*part > 0)
+      deep_v <- sum(LOB_partmin$vol*LOB_partmin$quote)
+      deep_hv <- sum(LOB_partmin$hvol*LOB_partmin$quote)
+      return(deep_hv/deep_v)
+    }
+    # En cell se almacenan los resultados de la función total_seep de cálculo
+    # de la profundidad total.
+    cell2 <- data.frame(deep_a = total_deep(-1), deep_b = total_deep(1))
+    # Acumula los resultados por minuto:
+    subtabla_ii_sub1 <- rbind(subtabla_ii_sub1, cell2)
+  }
+  # Se almacenan las tablas resultados en lista, convenientemente renombradas
+  # las filas.
+  tabla_ii_sub1[[d]] <- subtabla_ii_sub1
+  rownames(tabla_ii_sub1[[d]]) <- minute
+  cat(paste0("Stock",idx[d]," completado. ")) # Muestra el progreso en pantalla.
+  rm(d, t, minute, cell2, subtabla_ii_sub1, total_deep)
+}
+
+# Resumen de las tablas de tabla_ii_sub1
+tabla_ii_part1 <- data.frame()
+
+for (d in 1:length(tabla_ii_sub1)){
+  ask <- mean(tabla_ii_sub1[[d]]$deep_a)
+  bid <- mean(tabla_ii_sub1[[d]]$deep_b)
+  propf_oculta <- data.frame(propf_oculta = (ask+bid)/2)
+  tabla_ii_part1 <- rbind(tabla_ii_part1, propf_oculta)
+  rm(ask, bid, d, propf_oculta)
+}
+rownames(tabla_ii_part1) <- paste0("Stock", idx)
+```
+
+## 4.2. El volumen oculto durante la semana de la crisis
+
+Para determinar la importancia del volumen oculto durante esa semana en particular (en contraposición a las otras dos) es suficiente obtener la ratio del volumen oculto sobre el volumen total para cada semana y activo.
+
+```{r}
+# Subtabla para semanas, tabla_ii_sub2 (9 subtablas)
+tabla_ii_sub2 <- vector(mode = "list", length = length(LOB))
+
+for (d in 1:length(LOB)){
+  minute <- unique(LOB[[d]]$datime) # se extrae un vector con los minutos
+  subtabla_ii_sub2 <- data.frame() # se inicializa data.frame depositario
+  for (t in 1:length(minute)){
+    LOB_partmin <- LOB[[d]] %>%
+      filter(datime == minute[t]) # Filtra LOB por minuto
+    occ_vol <- sum(LOB_partmin$hvol)/sum(LOB_partmin$vol)
+    cell <- data.frame(Vol_ocult = occ_vol,
+                       minute = minute[t])
+    # Acumula los resultados por minuto:
+    subtabla_ii_sub2 <- rbind(subtabla_ii_sub2, cell)
+  }
+  # Se almacenan las tablas resultados en lista, 
+  # convenientemente renombradas las filas.
+  tabla_ii_sub2[[d]] <- subtabla_ii_sub2
+  rownames(tabla_ii_sub2[[d]]) <- minute
+  cat(paste0("Stock",idx[d]," completado. ")) # Muestra el progreso en pantalla.
+  rm(d, t, minute, cell, occ_vol, subtabla_ii_sub2, LOB_partmin)
+}
+
+# Resumen de las tablas de tabla_ii_sub2
+tabla_ii_part2 <- data.frame()
+
+for (d in 1:length(tabla_ii_sub2)){
+  # Se generala variable semana
+  tabla_ii_sub2[[d]]$week <- paste0(isoweek(tabla_ii_sub2[[d]]$minute), "-", 
+                                    year(tabla_ii_sub2[[d]]$minute))
+  weeks <- unique(tabla_ii_sub2[[d]]$week)
+  subtabla_ii_sub3 <- data.frame(aux = rep(NA, 1)) # Se inicializa data.frame
+  for (w in weeks){ # Por cada semana
+    tabla_ii_sub_w <- tabla_ii_sub2[[d]] %>%
+      filter(week == w) 
+    occ_vol <- mean(tabla_ii_sub_w$Vol_ocult) # Media del vol oculto
+    Vol_ocult <- data.frame(occ_vol) # Transforma en data.frame
+    subtabla_ii_sub3 <- cbind(subtabla_ii_sub3, Vol_ocult) # Agr a data.frame
+  }
+  tabla_ii_part2 <- rbind(tabla_ii_part2, subtabla_ii_sub3[,2:4])
+  rm(d, occ_vol, Vol_ocult, subtabla_ii_sub3, tabla_ii_sub_w, w)
+}
+rownames(tabla_ii_part2) <- paste0("Stock", idx)
+colnames(tabla_ii_part2) <- paste0("Semana_", weeks)
+```
+
+## 4.3. Distancia media del volumen oculto al precio eficiente
+
+Para conocer el grado en que el volumen oculto se posiciona más o menos cerca del precio eficiente primero cabe definir cómo va a medirse la distancia. Podría medirse en ticks, pero se ha considerado más conveniente medirlo en términos relativos, como porcentaje del precio de la acción.
+
+Para obtener esta medida de distancia es necesario obtener el precio eficiente para cada minuto del LOB y los precios medios ponderados en el *ask* y el *bid* del volumen oculto, estos últimos a partir de los vectores de precios y volúmenes ocultos. Las distancias relativas del volumen oculto se calculan como el valor absoluto de la resta entre los precios medios ponderados *ask* y *bid* y elprecio eficiente. Finalmente se calcula la media de ambas distancias ponderadas por el volumen oculto en cada caso.
+
+Los datos por minuto y activo se almacenan en tablas. Luego se agregan los datos por semanas por si pudieran vislumbrarse diferencias entre ellas.
+
+```{r}
+# Subtabla para distancia, tabla_ii_sub3 (9 subtablas)
+tabla_ii_sub3 <- vector(mode = "list", length = length(LOB))
+
+for (d in 1:length(LOB)){
+  minute <- unique(LOB[[d]]$datime) # se extrae un vector con los minutos
+  subtabla_ii_sub3 <- data.frame() # se inicializan data.frames depositarios
+  for (t in 1:length(minute)){
+    LOB_partmin <- LOB[[d]] %>%
+        # filtra por minuto
+      filter(datime == minute[t])
+    # Cálculo de los puntos medios:
+    q <- (LOB_partmin$quote[LOB_partmin$sign == 1] + 
+            LOB_partmin$quote[LOB_partmin$sign == -1])/2
+    ask_hvol <- LOB_partmin$hvol[LOB_partmin$sign < 0] 
+    # se vectorizan los volúmenes...
+    bid_hvol <- LOB_partmin$hvol[LOB_partmin$sign > 0]
+    ask_quote <- LOB_partmin$quote[LOB_partmin$sign < 0] # ...y los precios
+    bid_quote <- LOB_partmin$quote[LOB_partmin$sign > 0]
+    ask_meanq <- ifelse(sum(ask_hvol) == 0, 0, 
+                        sum(ask_hvol*ask_quote)/sum(ask_hvol))
+    bid_meanq <- ifelse(sum(bid_hvol) == 0, 0, 
+                        sum(bid_hvol*bid_quote)/sum(bid_hvol))
+    ask_reldist <- ifelse(ask_meanq == 0, 0, abs(q - ask_meanq)/ask_meanq)
+    bid_reldist <- ifelse(bid_meanq == 0, 0, abs(q - bid_meanq)/bid_meanq)
+    pmean_reldist <- ifelse(sum(ask_hvol) == 0 & sum(bid_hvol) == 0, NA,
+                      ((ask_reldist*sum(ask_hvol)) + 
+                         (bid_reldist*sum(bid_hvol)))/
+                        (sum(ask_hvol)+sum(bid_hvol)))
+    # en cell se almacenan los resultados
+    cell <- data.frame(reldist = pmean_reldist)
+    # Acumula los resultados por minuto:
+    subtabla_ii_sub3 <- rbind(subtabla_ii_sub3, cell)
+  }
+  # Se almacenan las tablas resultados en lista, convenientemente renombradas
+  # las filas.
+  cat(paste0("Stock", idx[d]," completado. ")) # Muestra el progreso en pantalla.
+  tabla_ii_sub3[[d]] <- subtabla_ii_sub3
+  rownames(tabla_ii_sub3[[d]]) <- minute
+  rm(d, t, q, ask_hvol, bid_hvol, ask_quote, bid_quote, ask_meanq, bid_meanq, 
+     ask_reldist, bid_reldist, pmean_reldist, minute, cell, subtabla_ii_sub3, 
+     LOB_partmin)
+}
+
+# Se separa por semana
+tabla_ii_part3 <- data.frame()
+
+for (d in 1:length(tabla_ii_sub3)){ # Por cada activo
+  tabla_ii_sub3[[d]]$week <- 
+    paste0(isoweek(ymd_hms(rownames(tabla_ii_sub3[[d]]))), "-", 
+                                    year(ymd_hms(rownames(tabla_ii_sub3[[d]]))))
+  row <- data.frame(aux = rep(NA, 1)) # se inicializa data.frame
+  for (w in 1:length(weeks)){ # Por cada semana
+    tabla_week <- tabla_ii_sub3[[d]] %>%
+      # Filtra por semana
+      filter(week == weeks[w])
+    mean_reldist <- mean(tabla_week$reldist, na.rm = T) # media de la dist.
+    mean_reldist <- data.frame(mean_reldist)
+    row <- cbind(row, mean_reldist) # agrega celda a la fila
+  }
+  row <- row[,2:4]
+  colnames(row) <- paste0("Dist_q_", weeks)
+  tabla_ii_part3 <- rbind(tabla_ii_part3, row)
+  rm(d, row, w, tabla_week, mean_reldist)
+}
+rownames(tabla_ii_part3) <- paste0("Stock",idx)
+```
+
+Por último se agregan las tres partes que integran Tabla II y se sacan las medias de todas las medidas de los activos por grado de capitalización. Los resultados se presentan como porcentajes.
+
+```{r}
+# Agregación de resultados: Tabla II
+tabla_ii <- cbind(tabla_ii_part1, tabla_ii_part2)
+tabla_ii <- cbind(tabla_ii, tabla_ii_part3)
+
+# Se sacan las medias por grado de capitalización
+columns_t2 <- colnames(tabla_ii)
+
+tabla_ii_transformed <- data.frame()
+for (i in 1:length(idx2)){
+  tabla_ii_transfer <- 
+    tabla_ii[which(idx == idx2[[i]][1]):which(idx == idx2[[i]][3]),]
+  mean_third <- 
+    data.frame(lapply(tabla_ii[which(idx == idx2[[i]][1]) : 
+                                 which(idx == idx2[[i]][3]),][, columns_t2], mean))
+  colnames(mean_third) <- columns_t2
+  rownames(mean_third) <- paste0("Stock", idx[which(idx == idx2[[i]][1])], 
+                                 "-", idx[which(idx == idx2[[i]][3])])
+  tabla_ii_transfer <- rbind(tabla_ii_transfer, mean_third)
+  tabla_ii_transformed <- rbind(tabla_ii_transformed, tabla_ii_transfer)
+}
+
+require(scales)
+tabla_ii_transformed[, columns_t2] <- 
+  lapply(tabla_ii_transformed[, columns_t2], percent_format(accuracy = .01))
+```
+
+```{r, eval=FALSE}
+# Para exportar tablas a formato Word
+ft <- flextable(data = tabla_ii_transformed %>% add_rownames()) %>% 
+  theme_zebra %>% autofit
+ft <- set_caption(ft, caption = "Tabla II", 
+                  style = "Table Caption")
+# Crea un archivo temp
+tmp <- tempfile(fileext = ".docx")
+# Crea un documento docx
+read_docx() %>% body_add_flextable(ft) %>% print(target = tmp)
+browseURL(tmp) # abre el documento
+```
+
+-AQUÍ VA TABLA II-
+
+--Comentarios de las tablas--
+
+# 5. Conclusiones
+
